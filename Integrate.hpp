@@ -88,6 +88,9 @@ namespace OTOO {
   const double Re = 6.378e8;  // earth radius
   const double Me = 5.974e27; // earth mass 
 
+  const double hf = 2.25;
+  const double KERNEL_FACTOR = M_1_PI;
+  
 #define n_opencldevice0 4
   uint64 n_ocl_dev;
   uint64 n_per_device;
@@ -99,9 +102,10 @@ namespace OTOO {
 
   cl_mem b_xi[n_opencldevice0];
   cl_mem b_jj[n_opencldevice0];
+  cl_mem b_idx[n_opencldevice0];
   cl_mem b_acc[n_opencldevice0];
   cl_mem b_vel[n_opencldevice0], b_rho[n_opencldevice0];
-  cl_mem b_mas[n_opencldevice0], b_alp[n_opencldevice0];
+  cl_mem b_alp[n_opencldevice0];
 
   std::string kernel_options;
   size_t globalThreads[1];
@@ -188,11 +192,14 @@ namespace OTOO {
     nall = i;
     psys.setNumberOfParticleLocal(nall);
 
-    double t;
+    int n;
+    f.get_var("nstep")->get(&n, 1);;
+    OTOO::nstep = n;
+    
     f.get_var("time")->get(&tmp, 1);;
-    t = tmp*tunit_inv;
-    std::cout << "# Read CDF file at time = " << t << "\n";
-
+    OTOO::t = tmp*tunit_inv;
+    std::cout << "# Read CDF file at time = " << OTOO::t << "\n";
+    
     double *buf_x = new double[nall];
     double *buf_y = new double[nall];
     double *buf_z = new double[nall];
@@ -234,18 +241,105 @@ namespace OTOO {
     delete buf_z;
   }
 
+  template<class Tpsys>
+  void WriteCDF(const char *filename, Tpsys & psys) {
+    /*
+    NcFile out(filename, NcFile::Replace);
+    if (!out.is_valid()) {
+      std::cerr << "WriteCDF failed\n";
+      return;
+    }
+
+    int n = nstep;
+    out.add_var("nstep", ncInt)->put(&n, 1);;
+    n = nall;
+    out.add_var("nall", ncInt)->put(&n, 1);
+    double tmp;
+    tmp = t*tunit;
+    out.add_var("time", ncDouble)->put(&tmp, 1);;
+    tmp = dt_sys*tunit;
+    out.add_var("dt_sys", ncDouble)->put(&tmp, 1);;
+
+    NcDim *na = out.add_dim("na", nall);
+    double *buf_x = new double[nall];
+    double *buf_y = new double[nall];
+    double *buf_z = new double[nall];
+
+    for(uint64 i = 0; i < nall; i++) {
+      buf_x[i] = x(i,0)*lunit;
+      buf_y[i] = x(i,1)*lunit;
+      buf_z[i] = x(i,2)*lunit;
+    }
+    out.add_var("px", ncDouble, na)->put(buf_x, nall);
+    out.add_var("py", ncDouble, na)->put(buf_y, nall);
+    out.add_var("pz", ncDouble, na)->put(buf_z, nall);
+
+    for(uint64 i = 0; i < nall; i++) {
+      buf_x[i] = v(i,0)*vunit;
+      buf_y[i] = v(i,1)*vunit;
+      buf_z[i] = v(i,2)*vunit;
+    }
+    out.add_var("vx", ncDouble, na)->put(buf_x, nall);
+    out.add_var("vy", ncDouble, na)->put(buf_y, nall);
+    out.add_var("vz", ncDouble, na)->put(buf_z, nall);
+
+    for(uint64 i = 0; i < nall; i++) {
+      buf_x[i] = m(i) *munit;
+      buf_y[i] = eg(i)*eunit;
+      buf_z[i] = h(i) *lunit;
+    }
+    out.add_var("ms", ncDouble, na)->put(buf_x, nall);
+    out.add_var("eg", ncDouble, na)->put(buf_y, nall);
+    out.add_var("hs", ncDouble, na)->put(buf_z, nall);
+
+    for(uint64 i = 0; i < nall; i++) {
+      buf_x[i] = dn(i)*dunit;
+      buf_y[i] = TT(i);
+      buf_z[i] = I(i);
+    }
+    out.add_var("dn", ncDouble, na)->put(buf_x, nall);
+    out.add_var("TT", ncDouble, na)->put(buf_y, nall);
+    out.add_var("Index", ncDouble, na)->put(buf_z, nall);
+
+    delete buf_x;
+    delete buf_y;
+    delete buf_z;
+    */
+  }
+
+  
   #include "kernel.file"
+
+  template<class typ>
+  struct Vec4 {
+    typ x, y, z, w;
+  };
+
+  template<class typ>
+  struct Vec2 {
+    typ x, y;
+  };
   
 #define __NI__  600000
-#define __NJ__  6000000
-  double xxx[__NJ__][4];
-  double vvv[__NJ__][4];
-  double rho[__NJ__][4];
-  double mas[__NJ__];
-  double alp[__NJ__];
-  int    jjj[__NI__][2];
-  double ggg[__NI__][4];
-  void SetupOpenCL(int ip = 0, int id = 0)
+#define __NJ__  18000000
+
+  uint64 nimax, njmax, nnmax;
+
+  struct Vec4<double> *xxx, *vvv, *rho, *ggg;
+  //  double xxx[__NJ__][4];
+  //  double vvv[__NJ__][4];
+  //  double rho[__NJ__][4];
+
+  // double ggg[__NI__][4];
+  //  double alp[__NJ__];
+  //  int    idx[__NJ__];
+  //  int    jjj[__NI__][2];
+
+  double *alp;
+  int *idx;
+  struct Vec2<int> *jjj;
+
+  void SetupOpenCL(int ip = 0, int id = 0, int __ni = __NI__, int __nj = __NJ__)
   {
     if (id < 0) {
       id = -id;
@@ -253,6 +347,11 @@ namespace OTOO {
     } else {
       n_ocl_dev = 1;   
     }
+
+    nimax = __ni;
+    njmax = 2*nimax;
+    nnmax = __nj;
+
     //    n_per_device = nalloc0/n_ocl_dev;
     for(uint64 i = 0; i < n_ocl_dev; i++) {
       ov.push_back(new OpenCLDevice(ip));    
@@ -260,44 +359,87 @@ namespace OTOO {
 
       ov[i]->SetKernelOptions(kernel_options);
       ov[i]->BuildOpenCLKernels(kernel_str);
-      ker[i] = ov[i]->GetKernel("grav");
 
-      ker_sph1[i] = ov[i]->GetKernel("ker_sph1");
-      ker_sph2[i] = ov[i]->GetKernel("ker_sph2");
+      ker[i] = ov[i]->GetKernel("grav_index");
+      ker_sph1[i] = ov[i]->GetKernel("ker_sph1_index");
+      ker_sph2[i] = ov[i]->GetKernel("ker_sph2_index");
 
       cl_int status = CL_SUCCESS;
       // read only buffers (HOST -> GPU)
-      b_xi[i]  = clCreateBuffer(ov[i]->ctx, CL_MEM_READ_ONLY, __NJ__*sizeof(cl_double4), NULL, &status);
-      b_jj[i]  = clCreateBuffer(ov[i]->ctx, CL_MEM_READ_ONLY, __NI__*sizeof(cl_int2), NULL, &status);
+      b_jj[i]   = clCreateBuffer(ov[i]->ctx, CL_MEM_READ_ONLY, nimax*sizeof(cl_int2), NULL, &status);
 
-      b_vel[i]  = clCreateBuffer(ov[i]->ctx, CL_MEM_READ_ONLY, __NJ__*sizeof(cl_double4), NULL, &status);
-      b_rho[i]  = clCreateBuffer(ov[i]->ctx, CL_MEM_READ_ONLY, __NJ__*sizeof(cl_double4), NULL, &status);
-      b_mas[i]  = clCreateBuffer(ov[i]->ctx, CL_MEM_READ_ONLY, __NJ__*sizeof(cl_double), NULL, &status);
-      b_alp[i]  = clCreateBuffer(ov[i]->ctx, CL_MEM_READ_ONLY, __NJ__*sizeof(cl_double), NULL, &status);
+      b_xi[i]   = clCreateBuffer(ov[i]->ctx, CL_MEM_READ_ONLY, njmax*sizeof(cl_double4), NULL, &status);
+      b_vel[i]  = clCreateBuffer(ov[i]->ctx, CL_MEM_READ_ONLY, njmax*sizeof(cl_double4), NULL, &status);
+      b_rho[i]  = clCreateBuffer(ov[i]->ctx, CL_MEM_READ_ONLY, njmax*sizeof(cl_double4), NULL, &status);
+      b_alp[i]  = clCreateBuffer(ov[i]->ctx, CL_MEM_READ_ONLY, njmax*sizeof(cl_double), NULL, &status);
+
+      b_idx[i]  = clCreateBuffer(ov[i]->ctx, CL_MEM_READ_ONLY, nnmax*sizeof(cl_int), NULL, &status);
 
       // output buffers (GPU -> HOST)
-      b_acc[i] = clCreateBuffer(ov[i]->ctx, CL_MEM_WRITE_ONLY, __NI__*sizeof(cl_double4), NULL, &status);
+      b_acc[i] = clCreateBuffer(ov[i]->ctx, CL_MEM_WRITE_ONLY, nimax*sizeof(cl_double4), NULL, &status);
 
       clSetKernelArg(OTOO::ker[i], 0, sizeof(cl_mem), (void *)&OTOO::b_xi[i]);
       clSetKernelArg(OTOO::ker[i], 1, sizeof(cl_mem), (void *)&OTOO::b_jj[i]);
-      clSetKernelArg(OTOO::ker[i], 2, sizeof(cl_mem), (void *)&OTOO::b_acc[i]);
-      //      clSetKernelArg(OTOO::ker[i], 3, sizeof(double), (void *)&eps2);
-
+      clSetKernelArg(OTOO::ker[i], 2, sizeof(cl_mem), (void *)&OTOO::b_idx[i]);
+      clSetKernelArg(OTOO::ker[i], 3, sizeof(cl_mem), (void *)&OTOO::b_acc[i]);
+      
       clSetKernelArg(OTOO::ker_sph1[i], 0, sizeof(cl_mem), (void *)&OTOO::b_xi[i]);
       clSetKernelArg(OTOO::ker_sph1[i], 1, sizeof(cl_mem), (void *)&OTOO::b_vel[i]);
-      clSetKernelArg(OTOO::ker_sph1[i], 2, sizeof(cl_mem), (void *)&OTOO::b_mas[i]);
-      clSetKernelArg(OTOO::ker_sph1[i], 3, sizeof(cl_mem), (void *)&OTOO::b_jj[i]);
+      clSetKernelArg(OTOO::ker_sph1[i], 2, sizeof(cl_mem), (void *)&OTOO::b_jj[i]);
+      clSetKernelArg(OTOO::ker_sph1[i], 3, sizeof(cl_mem), (void *)&OTOO::b_idx[i]);
       clSetKernelArg(OTOO::ker_sph1[i], 4, sizeof(cl_mem), (void *)&OTOO::b_acc[i]);
 
       clSetKernelArg(OTOO::ker_sph2[i], 0, sizeof(cl_mem), (void *)&OTOO::b_xi[i]);
       clSetKernelArg(OTOO::ker_sph2[i], 1, sizeof(cl_mem), (void *)&OTOO::b_vel[i]);
       clSetKernelArg(OTOO::ker_sph2[i], 2, sizeof(cl_mem), (void *)&OTOO::b_rho[i]);
-      clSetKernelArg(OTOO::ker_sph2[i], 3, sizeof(cl_mem), (void *)&OTOO::b_mas[i]);
-      clSetKernelArg(OTOO::ker_sph2[i], 4, sizeof(cl_mem), (void *)&OTOO::b_alp[i]);
-      clSetKernelArg(OTOO::ker_sph2[i], 5, sizeof(cl_mem), (void *)&OTOO::b_jj[i]);
+      clSetKernelArg(OTOO::ker_sph2[i], 3, sizeof(cl_mem), (void *)&OTOO::b_alp[i]);
+      clSetKernelArg(OTOO::ker_sph2[i], 4, sizeof(cl_mem), (void *)&OTOO::b_jj[i]);
+      clSetKernelArg(OTOO::ker_sph2[i], 5, sizeof(cl_mem), (void *)&OTOO::b_idx[i]);
       clSetKernelArg(OTOO::ker_sph2[i], 6, sizeof(cl_mem), (void *)&OTOO::b_acc[i]);
     }
+
+    xxx = new struct Vec4<double>[njmax];
+    vvv = new struct Vec4<double>[njmax];
+    rho = new struct Vec4<double>[njmax];
+    alp = new double[njmax];
+
+    idx = new int[nnmax];
+
+    ggg = new struct Vec4<double>[nimax];
+    jjj = new struct Vec2<int>[nimax];
+  }  
+
+  void ReallocateOpenCLMemory(int __nnmax)
+  {
+    cl_int status = CL_SUCCESS;
+
+    //    std::cout << nnmax << " " << __nnmax << "\n";
+    
+    nnmax = (int)(__nnmax*1.25);
+
+    //    std::cout << nnmax << " " << __nnmax << "\n";
+    
+    for(uint64 i = 0; i < n_ocl_dev; i++) {
+      clReleaseMemObject(b_idx[i]);
+      b_idx[i]  = clCreateBuffer(ov[i]->ctx, CL_MEM_READ_ONLY, nnmax*sizeof(cl_int), NULL, &status);
+      assert(status == CL_SUCCESS);
+
+      clSetKernelArg(OTOO::ker[i],      2, sizeof(cl_mem), (void *)&OTOO::b_idx[i]);
+      clSetKernelArg(OTOO::ker_sph1[i], 3, sizeof(cl_mem), (void *)&OTOO::b_idx[i]);
+      clSetKernelArg(OTOO::ker_sph2[i], 5, sizeof(cl_mem), (void *)&OTOO::b_idx[i]);
+    }
+    
+    delete[] idx;
+    
+    idx = new int[nnmax];    
+    //    std::cerr << "Reallocate OpenCL Memory\n";
   }
 
+  void ClearKernelTime()
+  {
+    kernel_count = 0;
+    kernel_time_grav = kernel_time_sph1 = kernel_time_sph2 = 0.0;
+  }
+  
 }
 #endif

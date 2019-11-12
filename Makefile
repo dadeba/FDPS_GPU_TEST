@@ -4,6 +4,7 @@ INC = -I$(PS_PATH) -I/usr/local/cuda/include
 CXX = g++
 CXX = mpicxx
 CXXFLAGS = -std=c++11 -O3 -ffast-math -funroll-loops
+#CXXFLAGS = -std=c++11 -g
 CXXFLAGS += -DPARTICLE_SIMULATOR_THREAD_PARALLEL -fopenmp
 CXXFLAGS += -DPARTICLE_SIMULATOR_MPI_PARALLEL
 

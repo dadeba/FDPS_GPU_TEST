@@ -206,8 +206,14 @@ int main(int argc, char* argv[]){
   //  std::cout << std::setprecision(15);
   //  std::cerr << std::setprecision(15);
 
-  std::cerr.precision( 4 );
-  std::cerr.setf( std::ios_base::scientific, std::ios_base::floatfield );
+  std::cout.precision( 6 );
+  //  std::cout.setf( std::ios_base::scientific, std::ios_base::floatfield );
+  std::cout.setf( std::ios_base::fixed, std::ios_base::floatfield );
+  //  std::cout.setf( std::ios_base::scientific, std::ios_base::fixed );
+
+  std::cerr.precision( 6 );
+  //  std::cerr.setf( std::ios_base::scientific, std::ios_base::floatfield );
+  std::cerr.setf( std::ios_base::fixed, std::ios_base::floatfield );
 
   // Initialize FDPS
   PS::Initialize(argc, argv);
@@ -227,16 +233,20 @@ int main(int argc, char* argv[]){
   psys.initialize();
 
   OTOO::InitSPHmodel();
-  OTOO::SetupOpenCL(0, PS::Comm::getRank());
     
   uint64 n_tot  = 0;
   uint64 n_loc  = 0;
+  bool flag_init = true;
   if(PS::Comm::getRank() == 0) {
     OTOO::ReadFile(psys, n_tot, n_loc);
   } else {
     psys.setNumberOfParticleLocal(n_loc);
   }
+
+  std::cout << OTOO::t << "\n";
   
+  OTOO::SetupOpenCL(0, PS::Comm::getRank(), 600000, 8000000);
+
   const PS::F32 coef_ema = 0.3;
   PS::DomainInfo dinfo;
   dinfo.initialize(coef_ema);
@@ -248,9 +258,7 @@ int main(int argc, char* argv[]){
     psys[i].al = OTOO::alpha_min;
   }
 
-  OTOO::kernel_time_grav = 0.0;
-  OTOO::kernel_time_sph1 = 0.0;
-  OTOO::kernel_time_sph2 = 0.0;
+  OTOO::ClearKernelTime();
   
   // Perform domain decomposition 
   dinfo.collectSampleParticle(psys);
@@ -258,24 +266,26 @@ int main(int argc, char* argv[]){
   psys.exchangeParticle(dinfo);
 
   const PS::F32 theta_grav = 0.5;
-  PS::S32 n_leaf_limit = 8;
-  PS::S32 n_group_limit = 1000;
+  PS::S32 n_leaf_limit = 8*2;
+  PS::S32 n_group_limit = 2000;
   
   PS::TreeForForceLong<G, EP_grav, EP_grav>::Monopole tree_grav;
   tree_grav.initialize(3 * n_loc, theta_grav, n_leaf_limit, n_group_limit);
   
-  const PS::S32 n_walk_limit = 100;
+  const PS::S32 n_walk_limit = 10000;
   const PS::S32 tag_max = 1;
-  tree_grav.calcForceAllAndWriteBackMultiWalk(DispatchKernel,
-					      RetrieveKernel,
-					      tag_max,
-					      psys,
-					      dinfo,
-					      n_walk_limit);
-  
+
+  tree_grav.clearTimeProfile();
+  tree_grav.calcForceAllAndWriteBackMultiWalkIndex(DispatchKernelIndex,
+						   RetrieveKernel,
+						   tag_max,
+						   psys,
+						   dinfo,
+						   n_walk_limit);
+
   OTOO::start_time_loop = PS::GetWtime();
   checkConservativeVariables(psys);
-
+  //  tree_grav.getTimeProfile().dump();
   
   PS::TreeForForceShort<SPH1, EP_hydro, EP_hydro>::Symmetry tree_sph1;
   tree_sph1.initialize(3 * n_loc, theta_grav, n_leaf_limit, n_group_limit);
@@ -284,31 +294,30 @@ int main(int argc, char* argv[]){
   tree_sph2.initialize(3 * n_loc, theta_grav, n_leaf_limit, n_group_limit);
 
   for(int l = 0; l < 70; l++) {
-    OTOO::kernel_time_sph1 = 0.0;
-    OTOO::kernel_count = 0;
-    tree_sph1.calcForceAllAndWriteBackMultiWalk(DispatchKernelSPH1,
-						RetrieveKernelSPH1,
-						tag_max,
-						psys,
-						dinfo,
-						n_walk_limit);
+    tree_sph1.calcForceAllAndWriteBackMultiWalkIndex(DispatchKernelSPH1Index,
+						     RetrieveKernelSPH1,
+						     tag_max,
+						     psys,
+						     dinfo,
+						     n_walk_limit);
+
     Apply(psys, UpdateSmoothingLength());
-    psys.exchangeParticle(dinfo);
+    //    psys.exchangeParticle(dinfo);
     if (l % 10 == 0) OutNN(psys);
   }
   
-  tree_sph1.calcForceAllAndWriteBackMultiWalk(DispatchKernelSPH1,
-					      RetrieveKernelSPH1,
-					      tag_max,
-					      psys,
-					      dinfo,
-					      n_walk_limit);
+  tree_sph1.calcForceAllAndWriteBackMultiWalkIndex(DispatchKernelSPH1Index,
+						   RetrieveKernelSPH1,
+						   tag_max,
+						   psys,
+						   dinfo,
+						   n_walk_limit);
 
   Apply(psys, UpdatePP());
   Apply(psys, UpdateCS());
   Apply(psys, UpdateVV());
 
-  tree_sph2.calcForceAllAndWriteBackMultiWalk(DispatchKernelSPH2,
+  tree_sph2.calcForceAllAndWriteBackMultiWalkIndex(DispatchKernelSPH2Index,
 					      RetrieveKernelSPH2,
 					      tag_max,
 					      psys,
@@ -320,68 +329,84 @@ int main(int argc, char* argv[]){
   OTOO::start_time_loop = PS::GetWtime();
   while(OTOO::t < OTOO::tend) {
     PS::INTERACTION_LIST_MODE int_mode = PS::REUSE_LIST;
+
+    //    Apply(psys, UpdateSmoothingLength());
     CalcDT(psys);
     if (PS::Comm::getRank() == 0) {
-      std::cout << OTOO::nstep << " : " << OTOO::t << "    " << OTOO::dt << "\n";
-      std::cout.flush();
+      std::cout << OTOO::nstep << " : " << OTOO::t << "    " << OTOO::dt << " ::: ";
+      //      std::cout.flush();
     }
     
     // predict
     Apply(psys, Kick());
 
-    if (OTOO::nstep % 8 == 0) {
+    OTOO::ClearKernelTime();
+    
+    if (OTOO::nstep % 4 == 0 || flag_init) {
       dinfo.collectSampleParticle(psys);
       dinfo.decomposeDomain();
       psys.exchangeParticle(dinfo);
       int_mode = PS::MAKE_LIST_FOR_REUSE;
+      if (flag_init) flag_init = false;
     }
     
-    tree_grav.calcForceAllAndWriteBackMultiWalk(DispatchKernel,
-						RetrieveKernel,
-						tag_max,
-						psys,
-						dinfo,
-						n_walk_limit,
-						true,
-						int_mode);
-
-    tree_sph1.calcForceAllAndWriteBackMultiWalk(DispatchKernelSPH1,
-						RetrieveKernelSPH1,
-						tag_max,
-						psys,
-						dinfo,
-						n_walk_limit,
-						true,
-						int_mode);
-
+    tree_grav.clearTimeProfile();
+    tree_grav.calcForceAllAndWriteBackMultiWalkIndex(DispatchKernelIndex,
+						     RetrieveKernel,
+						     tag_max,
+						     psys,
+						     dinfo,
+						     n_walk_limit,
+						     true,
+						     int_mode);
+    
+    tree_sph1.clearTimeProfile();
+    tree_sph1.calcForceAllAndWriteBackMultiWalkIndex(DispatchKernelSPH1Index,
+						     RetrieveKernelSPH1,
+						     tag_max,
+						     psys,
+						     dinfo,
+						     n_walk_limit,
+    						     true,
+    						     int_mode);
+    
     Apply(psys, UpdateSmoothingLength());
-
-    tree_sph1.calcForceAllAndWriteBackMultiWalk(DispatchKernelSPH1,
-						RetrieveKernelSPH1,
-						tag_max,
-						psys,
-						dinfo,
-						n_walk_limit,
-						true,
-						int_mode);
+    
+    tree_sph1.calcForceAllAndWriteBackMultiWalkIndex(DispatchKernelSPH1Index,
+						     RetrieveKernelSPH1,
+						     tag_max,
+						     psys,
+						     dinfo,
+						     n_walk_limit,
+						     true,
+						     PS::REUSE_LIST);
 
     Apply(psys, UpdatePP());
     Apply(psys, UpdateCS());
     Apply(psys, UpdateVV());
     
-    tree_sph2.calcForceAllAndWriteBackMultiWalk(DispatchKernelSPH2,
-						RetrieveKernelSPH2,
-						tag_max,
-						psys,
-						dinfo,
-						n_walk_limit,
-						true,
-						int_mode);
+    tree_sph2.clearTimeProfile();
+    tree_sph2.calcForceAllAndWriteBackMultiWalkIndex(DispatchKernelSPH2Index,
+						     RetrieveKernelSPH2,
+						     tag_max,
+						     psys,
+						     dinfo,
+						     n_walk_limit,
+						     true,
+						     int_mode);
 
     Apply(psys, ForceSum());
 
     // correct
     Apply(psys, Drift());
+
+    if (PS::Comm::getRank() == 0) {
+      std::cout << tree_grav.getTimeProfile().calc_force << " (" << OTOO::kernel_time_grav << ") "
+		<< tree_sph1.getTimeProfile().calc_force << " (" << OTOO::kernel_time_sph1 << ") "
+		<< tree_sph2.getTimeProfile().calc_force << " (" << OTOO::kernel_time_sph2 << ") "
+		<< OTOO::kernel_count << "\n";
+      std::cout.flush();
+    }
     
     OTOO::t += OTOO::dt;
     OTOO::nstep++;
@@ -392,6 +417,7 @@ int main(int argc, char* argv[]){
     }
 
     if (fmod(OTOO::t, OTOO::dt_dump) == 0.0) {
+      //      OutNN(psys);
     }
   }
   

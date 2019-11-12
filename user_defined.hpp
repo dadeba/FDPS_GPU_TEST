@@ -77,7 +77,7 @@ public:
   PS::F64    pp;  // pressure
   PS::F64    al;  // vis alpha
 
-#define KERNEL_FACTOR M_1_PI
+  //#define KERNEL_FACTOR M_1_PI
   
   void copyFromForce(const G& f) {
     this->acc_grav = f.acc;
@@ -85,17 +85,21 @@ public:
   }
 
   void copyFromForce(const SPH1& f){
-    this->dn = f.dn*KERNEL_FACTOR;
-    this->dd = f.dd*KERNEL_FACTOR;
+    this->dn = f.dn*OTOO::KERNEL_FACTOR;
+    this->dd = f.dd*OTOO::KERNEL_FACTOR;
     this->nn = f.nn;
-    this->div = -this->dd/this->dn;
-    //    this->rot = sqrt(f.rot*f.rot)*KERNEL_FACTOR/this->dn;
-    this->rot = f.rot.x*KERNEL_FACTOR/this->dn;
+
+    double dn_inv = 1.0/this->dn;
+    this->div = -this->dd*dn_inv;
+
+    //    this->rot = sqrt(f.rot*f.rot)*KERNEL_FACTOR*dn_inv;
+
+    this->rot = f.rot.x*OTOO::KERNEL_FACTOR*dn_inv;
   }
 
   void copyFromForce(const SPH2& f){
-    this->acc_hydro = f.acc*KERNEL_FACTOR;
-    this->de        = f.de*KERNEL_FACTOR;
+    this->acc_hydro = f.acc*OTOO::KERNEL_FACTOR;
+    this->de        = f.de *OTOO::KERNEL_FACTOR;
   }
   
   PS::F64 getCharge() const{
@@ -107,7 +111,7 @@ public:
   }
 
   PS::F64 getRSearch() const{
-    return this->h;
+    return OTOO::hf*this->h;
   }
 
   void setPos(const PS::F64vec& pos){
@@ -164,82 +168,12 @@ public:
     return this->x;
   }
   PS::F64 getRSearch() const{
-    return 2.1 * this->h;
+    return OTOO::hf * this->h;
   }
   void setPos(const PS::F64vec& pos){
     this->x = pos;
   }
 };
-
-/* Interaction functions */
-template <class TParticleJ>
-void CalcGravity (const EP_grav * ep_i,
-                  const PS::S32 n_ip,
-                  const TParticleJ * ep_j,
-                  const PS::S32 n_jp,
-                  G * force) {
-  const PS::F64 eps2 = OTOO::eps*OTOO::eps;
-  for(PS::S64 i = 0; i < n_ip; i++){
-    PS::F64vec xi = ep_i[i].getPos();
-    PS::F64vec ai = 0.0;
-    PS::F64 poti = 0.0;
-    for(PS::S32 j = 0; j < n_jp; j++){
-      PS::F64vec rij    = xi - ep_j[j].getPos();
-      PS::F64    r3_inv = rij * rij + eps2;
-      PS::F64    r_inv  = 1.0/sqrt(r3_inv);
-      r3_inv  = r_inv * r_inv;
-      r_inv  *= ep_j[j].getCharge();
-      r3_inv *= r_inv;
-      ai     -= r3_inv * rij;
-      poti   -= r_inv;
-    }
-    force[i].acc += ai;
-    force[i].pot += poti;
-  }
-}
-
-static double sph_kernel(double q)
-{
-  double dum, dum1, dum2;
-
-  dum1 = 2.0 - q;
-  dum1= 0.25f*dum1*dum1*dum1;
-
-  dum2 = q*q;
-  dum2 = 1.0 - 1.5*dum2 + 0.75*dum2*q;
-
-  dum = (q >= 2.0) ? 0.0f : dum1;
-  dum = (q >= 1.0) ? dum  : dum2;
-
-  return dum;
-}
-
-static double my_recip(double q) {
-  return 1.0/q;
-}
-
-static double sph_dkernel(double q)
-{
-  double dum;
-  double dum1, dum2, dum3;
-  double q_i;
-
-  q_i = 1.0;
-  if (q != 0.0) q_i = my_recip(q);
-  
-  dum1 = 2.0 - q;
-  dum1 = -0.75*dum1*dum1*q_i;
-
-  dum2 = -0.75*(4.0-3.0*q);
-
-  dum3 = -q_i;
-
-  dum = (q > 2.0 || q == 0.0f) ? 0.0f : dum1;
-  dum = (q > 1.0)              ? dum  : dum2;
-  dum = (q > 2.0/3.0)          ? dum  : dum3;
-
-  return dum;
-}
 
 static double aValue(double s)
 {
@@ -250,212 +184,147 @@ static double aValue(double s)
   }
 }
 
-class CalcSPH1 {
-public:
-  void operator () (const EP_hydro * ep_i,
-		    const PS::S32 n_ip,
-		    const EP_hydro * ep_j,
-		    const PS::S32 n_jp,
-		    SPH1 * force)
-  {
-    for (uint64 i = 0; i < n_ip ; i++){
-      const double hi = ep_i[i].h;
-
-      double den  = 0.0;
-      double rotx = 0.0;
-      double roty = 0.0;
-      double rotz = 0.0;
-      double dd   = 0.0;
-      double nn   = 0.0;
-      
-      // Compute density
-      for (uint64 j = 0; j < n_jp; j++){
-	const PS::F64vec dx = ep_i[i].x - ep_j[j].x;
-	const PS::F64vec dv = ep_i[i].v - ep_j[j].v;
-	const PS::F64    r2 = dx*dx;
-
-	double hj = ep_j[j].h;
-	double mj = ep_j[j].m;
-	
-	double q, h1_i, ker, dker, dum1, dum2, xv;
-	double h2_i, h3_i, h5_i;
-
-	h1_i = 2.0/(hi + hj);
-	q = sqrt(r2)*h1_i;
-
-	h2_i = h1_i*h1_i;
-	h3_i = h2_i*h1_i;
-	h5_i = h2_i*h3_i;
-	ker  = sph_kernel(q)*h3_i;
-	dker = sph_dkernel(q)*h5_i;
-  
-	// density
-	den += mj*ker;
-  
-	// roration
-	dum1 = mj*dker;
-	rotx += (dv.y*dx.z - dv.z*dx.y)*dum1;
-	roty += (dv.z*dx.x - dv.x*dx.z)*dum1;
-	rotz += (dv.x*dx.y - dv.y*dx.x)*dum1;
-  
-	// time derivative of density
-	xv = dx.x*dv.x + dx.y*dv.y + dx.z*dv.z;
-	dum2 = xv*dum1;
-	dd += dum2;
-
-	// NN
-	if (q < 1.5) {
-	  nn += 1.0;
-	} else {
-	  nn += sph_kernel(4.0*(q-1.5));
-	}
-      }
-      
-      force[i].dn    = den;
-      force[i].rot.x = rotx;
-      force[i].rot.y = roty;
-      force[i].rot.z = rotz;
-      force[i].dd    = dd;
-      force[i].nn    = nn;
-    }
+void CheckNNMAX(const PS::S32 n_walk, const PS::S32 *n_epj, const PS::S32 *n_spj)
+{
+  int c = 0;
+  for(int iw = 0; iw < n_walk; iw++){
+    c += n_epj[iw];
+    if (n_spj != NULL) c += n_spj[iw];
   }
-};
-
-class CalcSPH2 {
-public:
-  void operator () (const EP_hydro * ep_i,
-		    const PS::S32 n_ip,
-		    const EP_hydro * ep_j,
-		    const PS::S32 n_jp,
-		    SPH2 * force)
-  {
-    for (uint64 i = 0; i < n_ip ; i++){
-      const double hi = ep_i[i].h;
-
-      double ax = 0.0;
-      double ay = 0.0;
-      double az = 0.0;
-      double de = 0.0;
-      
-      for (uint64 j = 0; j < n_jp; j++){
-	const PS::F64vec dx = ep_i[i].x - ep_j[j].x;
-	const PS::F64vec dv = ep_i[i].v - ep_j[j].v;
-	const PS::F64    r2 = dx*dx;
-
-	double hj = ep_j[j].h;
-	double mj = ep_j[j].m;
-
-	double q, h1, h1_i, dker, eta2, dum1, dum2, dum3, xv, vis;
-	double h2_i, h3_i, h5_i;
-	double alph, beta;
-	
-	h1 = (hi + hj)/2.0;
-	h1_i = 1.0/h1;
-	q = sqrt(r2)*h1_i;
-
-	h2_i = h1_i*h1_i;
-	h3_i = h2_i*h1_i;
-	h5_i = h2_i*h3_i;
-	dker = sph_dkernel(q)*h5_i;
-
-	xv = dx.x*dv.x + dx.y*dv.y + dx.z*dv.z;
-	if (xv < 0.0) {
-	  dum1 = 0.5*(ep_i[i].dn + ep_j[j].dn); // rho
-	  dum2 = 0.5*(ep_i[i].cs + ep_j[j].cs); // cs
-    
-	  eta2 = 0.01*h1*h1;
-	  dum3 = (h1*xv)/(r2 + eta2);
-
-	  alph = std::max(ep_i[i].al, ep_j[j].al);
-	  beta = 2.0*alph;
-
-	  vis = (-alph*dum2*dum3 + beta*dum3*dum3)/dum1;
-	  vis = 0.5*(ep_i[i].vv + ep_j[j].vv)*vis; // vis
-	} else {
-	  vis = 0.0;
-	}
-
-	dum1 = mj*dker;
-	dum2 = (ep_i[i].pp + ep_j[j].pp + vis)*dum1; // pp
-	dum3 = xv*dum1;
-  
-	// accelaration
-	ax += -dx.x*dum2;
-	ay += -dx.y*dum2;
-	az += -dx.z*dum2;
-  
-	// time derivative of internal energy
-	de += (ep_i[i].pp + 0.5*vis)*dum3;
-      }
-      
-      force[i].acc.x = ax;
-      force[i].acc.y = ay;
-      force[i].acc.z = az;
-      force[i].de    = de;
-    }
+  if (c >= OTOO::nnmax) {
+    OTOO::ReallocateOpenCLMemory(c);
   }
-};
+  //  assert( c < OTOO::nnmax );
+}
 
-PS::S32 DispatchKernel(
-		       const PS::S32          tag,
-		       const PS::S32          n_walk,
-		       const EP_grav          *epi[],
-		       const PS::S32          n_epi[],
-		       const EP_grav          *epj[],
-		       const PS::S32          n_epj[],
-		       const PS::SPJMonopole  *spj[],
-		       const PS::S32           n_spj[])
+PS::S32 DispatchKernelIndex(
+			    const PS::S32   tag,
+			    const PS::S32   n_walk,
+			    const EP_grav  *epi[],
+			    const PS::S32   n_epi[],
+			    const PS::S32  *id_epj[],
+			    const PS::S32  *n_epj,
+			    const PS::S32  *id_spj[],
+			    const PS::S32  *n_spj,
+			    const EP_grav  *epj,
+			    const PS::S32   n_epj_tot,
+			    const PS::SPJMonopole  *spj,
+			    const PS::S32   n_spj_tot,
+			    const bool send_flag)
 {
   const PS::F64 eps2 = OTOO::eps*OTOO::eps;
   uint64 c = 0;
 
+  if (n_walk == 0) return 0;
+
   for(int iw = 0; iw < n_walk; iw++){
     for(int i = 0; i < n_epi[iw]; i++){
       PS::F64vec xi = epi[iw][i].getPos();
-      OTOO::xxx[c][0] = xi.x;
-      OTOO::xxx[c][1] = xi.y;
-      OTOO::xxx[c][2] = xi.z;
-      OTOO::xxx[c][3] = (double)iw;
+      OTOO::xxx[c].x = xi.x;
+      OTOO::xxx[c].y = xi.y;
+      OTOO::xxx[c].z = xi.z;
+      OTOO::xxx[c].w = (double)iw;
       c++;
     }
   }
   int ni = c;
+
+  assert( ni                     < OTOO::nimax );
+  assert( ni+n_epj_tot+n_spj_tot < OTOO::njmax );
+  CheckNNMAX(n_walk, n_epj, n_spj);
   
-  for(int iw = 0; iw < n_walk; iw++){
-    OTOO::jjj[iw][0] = c;
-
-    for(int j = 0; j < n_epj[iw]; j++){
-      PS::F64vec xj = epj[iw][j].getPos();
-      OTOO::xxx[c][0] = xj.x;
-      OTOO::xxx[c][1] = xj.y;
-      OTOO::xxx[c][2] = xj.z;
-      OTOO::xxx[c][3] = epj[iw][j].getCharge();
-      c++;
-    }
-    for(int j = 0; j < n_spj[iw]; j++){
-      PS::F64vec xj = spj[iw][j].getPos();
-      OTOO::xxx[c][0] = xj.x;
-      OTOO::xxx[c][1] = xj.y;
-      OTOO::xxx[c][2] = xj.z;
-      OTOO::xxx[c][3] = spj[iw][j].getCharge();
-      c++;
-    }
-
-    OTOO::jjj[iw][1] = c;
+  for(int j = 0; j < n_epj_tot; j++){
+    PS::F64vec xj = epj[j].getPos();
+    OTOO::xxx[c].x = xj.x;
+    OTOO::xxx[c].y = xj.y;
+    OTOO::xxx[c].z = xj.z;
+    OTOO::xxx[c].w = epj[j].getCharge();
+    c++;
   }
+  for(int j = 0; j < n_spj_tot; j++){
+    PS::F64vec xj = spj[j].getPos();
+    OTOO::xxx[c].x = xj.x;
+    OTOO::xxx[c].y = xj.y;
+    OTOO::xxx[c].z = xj.z;
+    OTOO::xxx[c].w = spj[j].getCharge();
+    c++;
+  }
+  int nall = c;
+  
+  c = 0;
+  for(int iw = 0; iw < n_walk; iw++){
+    OTOO::jjj[iw].x = c;
 
-  clSetKernelArg(OTOO::ker[0], 3, sizeof(double), (void *)&eps2);
+    int offset = ni;
+    for(int j = 0; j < n_epj[iw]; j++){
+      int jj = id_epj[iw][j] + offset;
+      OTOO::idx[c] = jj;
+      c++;
+    }
+
+    offset = ni + n_epj_tot;
+    for(int j = 0; j < n_spj[iw]; j++){
+      int jj = id_spj[iw][j] + offset;
+      OTOO::idx[c] = jj;
+      c++;
+    }
+    OTOO::jjj[iw].y = c;
+  }
+  int nidx = c;
+  
+  clSetKernelArg(OTOO::ker[0], 4, sizeof(double), (void *)&eps2);
 
   cl_bool flag = CL_FALSE; 
-  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_xi[0], flag, 0, c*sizeof(cl_double4),   OTOO::xxx, 0, NULL, NULL);
-  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_jj[0], flag, 0, n_walk*sizeof(cl_int2), OTOO::jjj, 0, NULL, NULL);
-
+  
+  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_xi[0],  flag, 0, nall*sizeof(cl_double4),   OTOO::xxx, 0, NULL, NULL);
+  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_jj[0],  flag, 0, n_walk*sizeof(cl_int2), OTOO::jjj, 0, NULL, NULL);
+  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_idx[0], flag, 0, nidx*sizeof(cl_int),       OTOO::idx, 0, NULL, NULL);
+  
   OTOO::globalThreads[0] = ni;
   cl_int status = CL_SUCCESS;
-  status = clEnqueueNDRangeKernel(OTOO::ov[0]->q, OTOO::ker[0], 1, NULL, OTOO::globalThreads, NULL, 0, NULL,
+  status = clEnqueueNDRangeKernel(OTOO::ov[0]->q, OTOO::ker[0], 1,
+				  NULL, OTOO::globalThreads, NULL, 0, NULL,
 				  &OTOO::ker_event[0]);
+
   assert(status == CL_SUCCESS);
 
+  /*
+  for(int i = 0; i < ni; i++){
+    PS::F64vec xi;
+    xi.x = OTOO::xxx[i][0];
+    xi.y = OTOO::xxx[i][1];
+    xi.z = OTOO::xxx[i][2];
+    int iw = (int)OTOO::xxx[i][3];
+
+    PS::F64vec ai = 0.0;
+    PS::F64 poti = 0.0;
+
+    for(int j = OTOO::jjj[iw][0]; j < OTOO::jjj[iw][1]; j++){
+      int jj = OTOO::idx[j];
+      PS::F64vec xj;
+      PS::F64    mj;
+      xj.x = OTOO::xxx[jj][0];
+      xj.y = OTOO::xxx[jj][1];
+      xj.z = OTOO::xxx[jj][2];
+      mj   = OTOO::xxx[jj][3];
+
+      PS::F64vec rij    = xi - xj;
+      PS::F64    r3_inv = rij * rij + eps2;
+      PS::F64    r_inv  = 1.0/sqrt(r3_inv);
+      r3_inv  = r_inv * r_inv;
+      r_inv  *= mj;
+      r3_inv *= r_inv;
+      ai     -= r3_inv * rij;
+      poti   -= r_inv;
+    }
+    
+    OTOO::ggg[i][0] = ai.x;
+    OTOO::ggg[i][1] = ai.y;
+    OTOO::ggg[i][2] = ai.z;
+    OTOO::ggg[i][3] = poti;
+  }
+  */
+  
   return 0;
 }
 
@@ -465,6 +334,9 @@ PS::S32 RetrieveKernel(const PS::S32 tag,
                        G *force[])
 {
   uint64 c = 0;
+
+  if (n_walk == 0) return 0;
+  
   c = OTOO::globalThreads[0];
   clFinish(OTOO::ov[0]->q);
 
@@ -477,14 +349,14 @@ PS::S32 RetrieveKernel(const PS::S32 tag,
   
   cl_bool flag = CL_TRUE;
   clEnqueueReadBuffer(OTOO::ov[0]->q, OTOO::b_acc[0], flag, 0, c*sizeof(cl_double4), OTOO::ggg, 0, NULL, NULL);
-
+  
   c = 0;
   for(int iw=0; iw<n_walk; iw++){
     for(int i=0; i<ni[iw]; i++){
-      force[iw][i].acc.x = OTOO::ggg[c][0];
-      force[iw][i].acc.y = OTOO::ggg[c][1];
-      force[iw][i].acc.z = OTOO::ggg[c][2];
-      force[iw][i].pot   = OTOO::ggg[c][3];
+      force[iw][i].acc.x = OTOO::ggg[c].x;
+      force[iw][i].acc.y = OTOO::ggg[c].y;
+      force[iw][i].acc.z = OTOO::ggg[c].z;
+      force[iw][i].pot   = OTOO::ggg[c].w;
       c++;
     }
   }
@@ -492,63 +364,80 @@ PS::S32 RetrieveKernel(const PS::S32 tag,
   return 0;
 }
 
-PS::S32 DispatchKernelSPH1(
-			   const PS::S32          tag,
-			   const PS::S32          n_walk,
-			   const EP_hydro         *epi[],
-			   const PS::S32          n_epi[],
-			   const EP_hydro         *epj[],
-			   const PS::S32          n_epj[])
+PS::S32 DispatchKernelSPH1Index(
+			   const PS::S32   tag,
+			   const PS::S32   n_walk,
+			   const EP_hydro *epi[],
+			   const PS::S32   n_epi[],
+			   const PS::S32  *id_epj[],
+			   const PS::S32  *n_epj,
+			   const EP_hydro *epj,
+			   const PS::S32   n_epj_tot,
+			   const bool send_flag)
 {
   uint64 c = 0;
-
+  if (n_walk == 0) return 0;
+  
   for(int iw = 0; iw < n_walk; iw++){
     for(int i = 0; i < n_epi[iw]; i++){
       PS::F64vec xi = epi[iw][i].getPos();
-      OTOO::xxx[c][0] = xi.x;
-      OTOO::xxx[c][1] = xi.y;
-      OTOO::xxx[c][2] = xi.z;
-      OTOO::xxx[c][3] = (double)iw;
+      OTOO::xxx[c].x = xi.x;
+      OTOO::xxx[c].y = xi.y;
+      OTOO::xxx[c].z = xi.z;
+      OTOO::xxx[c].w = (double)iw;
 
       PS::F64vec vi = epi[iw][i].v;
-      OTOO::vvv[c][0] = vi.x;
-      OTOO::vvv[c][1] = vi.y;
-      OTOO::vvv[c][2] = vi.z;
-      OTOO::vvv[c][3] = epi[iw][i].h;
-      OTOO::mas[c]    = epi[iw][i].m;
+      OTOO::vvv[c].x = vi.x;
+      OTOO::vvv[c].y = vi.y;
+      OTOO::vvv[c].z = vi.z;
+      OTOO::vvv[c].w = epi[iw][i].h;
       c++;
     }
   }
   int ni = c;
+
+  assert( ni           < OTOO::nimax );
+  assert( ni+n_epj_tot < OTOO::njmax );
+  CheckNNMAX(n_walk, n_epj, NULL);
   
+  for(int j = 0; j < n_epj_tot; j++){
+    PS::F64vec xj = epj[j].getPos();
+    OTOO::xxx[c].x = xj.x;
+    OTOO::xxx[c].y = xj.y;
+    OTOO::xxx[c].z = xj.z;
+    OTOO::xxx[c].w = epj[j].m;
+
+    PS::F64vec vi = epj[j].v;
+    OTOO::vvv[c].x = vi.x;
+    OTOO::vvv[c].y = vi.y;
+    OTOO::vvv[c].z = vi.z;
+    OTOO::vvv[c].w = epj[j].h;
+    c++;
+  }
+  int nall = c;
+
+  c = 0;  
   for(int iw = 0; iw < n_walk; iw++){
-    OTOO::jjj[iw][0] = c;
+    OTOO::jjj[iw].x = c;
 
+    int offset = ni;
     for(int j = 0; j < n_epj[iw]; j++){
-      PS::F64vec xj = epj[iw][j].getPos();
-      OTOO::xxx[c][0] = xj.x;
-      OTOO::xxx[c][1] = xj.y;
-      OTOO::xxx[c][2] = xj.z;
-      OTOO::xxx[c][3] = epj[iw][j].m;
-
-      PS::F64vec vi = epj[iw][j].v;
-      OTOO::vvv[c][0] = vi.x;
-      OTOO::vvv[c][1] = vi.y;
-      OTOO::vvv[c][2] = vi.z;
-      OTOO::vvv[c][3] = epj[iw][j].h;
-      OTOO::mas[c]    = epj[iw][j].m;
+      int jj = id_epj[iw][j] + offset;
+      OTOO::idx[c] = jj;
       c++;
     }
 
-    OTOO::jjj[iw][1] = c;
+    OTOO::jjj[iw].y = c;
   }
+  int nidx = c;
 
   cl_bool flag = CL_FALSE; 
-  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_xi[0],  flag, 0, c*sizeof(cl_double4),   OTOO::xxx, 0, NULL, NULL);
-  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_vel[0], flag, 0, c*sizeof(cl_double4),   OTOO::vvv, 0, NULL, NULL);
-  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_mas[0], flag, 0, c*sizeof(cl_double),    OTOO::mas, 0, NULL, NULL);
-  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_jj[0],  flag, 0, n_walk*sizeof(cl_int2), OTOO::jjj, 0, NULL, NULL);
+  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_xi[0],  flag, 0, nall*sizeof(cl_double4), OTOO::xxx, 0, NULL, NULL);
+  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_vel[0], flag, 0, nall*sizeof(cl_double4), OTOO::vvv, 0, NULL, NULL);
+  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_jj[0],  flag, 0, n_walk*sizeof(cl_int2),  OTOO::jjj, 0, NULL, NULL);
 
+  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_idx[0], flag, 0, nidx*sizeof(cl_int),       OTOO::idx, 0, NULL, NULL);
+  
   OTOO::globalThreads[0] = ni;
   cl_int status = CL_SUCCESS;
   status = clEnqueueNDRangeKernel(OTOO::ov[0]->q, OTOO::ker_sph1[0],
@@ -565,6 +454,8 @@ PS::S32 RetrieveKernelSPH1(const PS::S32 tag,
                        SPH1 *force[])
 {
   uint64 c = 0;
+  if (n_walk == 0) return 0;
+
   c = OTOO::globalThreads[0];
   clFinish(OTOO::ov[0]->q);
 
@@ -581,92 +472,107 @@ PS::S32 RetrieveKernelSPH1(const PS::S32 tag,
   c = 0;
   for(int iw=0; iw<n_walk; iw++){
     for(int i=0; i<ni[iw]; i++){
-      force[iw][i].dn    = OTOO::ggg[c][3];
-      force[iw][i].rot.x = OTOO::ggg[c][0];
-      force[iw][i].dd    = OTOO::ggg[c][1];
-      force[iw][i].nn    = OTOO::ggg[c][2];
+      force[iw][i].dn    = OTOO::ggg[c].w;
+      force[iw][i].rot.x = OTOO::ggg[c].x;
+      force[iw][i].dd    = OTOO::ggg[c].y;
+      force[iw][i].nn    = OTOO::ggg[c].z;
       c++;
     }
   }
 
-  OTOO::kernel_count++;
   return 0;
 }
 
-PS::S32 DispatchKernelSPH2(const PS::S32          tag,
-			   const PS::S32          n_walk,
-			   const EP_hydro         *epi[],
-			   const PS::S32          n_epi[],
-			   const EP_hydro         *epj[],
-			   const PS::S32          n_epj[])
+PS::S32 DispatchKernelSPH2Index(
+			   const PS::S32   tag,
+			   const PS::S32   n_walk,
+			   const EP_hydro *epi[],
+			   const PS::S32   n_epi[],
+			   const PS::S32  *id_epj[],
+			   const PS::S32  *n_epj,
+			   const EP_hydro *epj,
+			   const PS::S32   n_epj_tot,
+			   const bool send_flag)
 {
   uint64 c = 0;
-
+  if (n_walk == 0) return 0;
+ 
   for(int iw = 0; iw < n_walk; iw++){
     for(int i = 0; i < n_epi[iw]; i++){
       PS::F64vec xi = epi[iw][i].getPos();
-      OTOO::xxx[c][0] = xi.x;
-      OTOO::xxx[c][1] = xi.y;
-      OTOO::xxx[c][2] = xi.z;
-      OTOO::xxx[c][3] = (double)iw;
+      OTOO::xxx[c].x = xi.x;
+      OTOO::xxx[c].y = xi.y;
+      OTOO::xxx[c].z = xi.z;
+      OTOO::xxx[c].w = (double)iw;
 
       PS::F64vec vi = epi[iw][i].v;
-      OTOO::vvv[c][0] = vi.x;
-      OTOO::vvv[c][1] = vi.y;
-      OTOO::vvv[c][2] = vi.z;
-      OTOO::vvv[c][3] = epi[iw][i].h;
+      OTOO::vvv[c].x = vi.x;
+      OTOO::vvv[c].y = vi.y;
+      OTOO::vvv[c].z = vi.z;
+      OTOO::vvv[c].w = epi[iw][i].h;
 
-      OTOO::rho[c][0] = epi[iw][i].dn;
-      OTOO::rho[c][1] = epi[iw][i].cs;
-      OTOO::rho[c][2] = epi[iw][i].vv;
-      OTOO::rho[c][3] = epi[iw][i].pp;
+      OTOO::rho[c].x = epi[iw][i].dn;
+      OTOO::rho[c].y = epi[iw][i].cs;
+      OTOO::rho[c].z = epi[iw][i].vv;
+      OTOO::rho[c].w = epi[iw][i].pp;
 
-      OTOO::mas[c]    = epi[iw][i].m;
       OTOO::alp[c]    = epi[iw][i].al;
       c++;
     }
   }
   int ni = c;
+
+  assert( ni           < OTOO::nimax );
+  assert( ni+n_epj_tot < OTOO::njmax );
+  CheckNNMAX(n_walk, n_epj, NULL);
   
+  for(int j = 0; j < n_epj_tot; j++){
+    PS::F64vec xj = epj[j].getPos();
+    OTOO::xxx[c].x = xj.x;
+    OTOO::xxx[c].y = xj.y;
+    OTOO::xxx[c].z = xj.z;
+    OTOO::xxx[c].w = epj[j].m;
+
+    PS::F64vec vi = epj[j].v;
+    OTOO::vvv[c].x = vi.x;
+    OTOO::vvv[c].y = vi.y;
+    OTOO::vvv[c].z = vi.z;
+    OTOO::vvv[c].w = epj[j].h;
+    
+    OTOO::rho[c].x = epj[j].dn;
+    OTOO::rho[c].y = epj[j].cs;
+    OTOO::rho[c].z = epj[j].vv;
+    OTOO::rho[c].w = epj[j].pp;
+
+    OTOO::alp[c]    = epj[j].al;
+    c++;
+  }
+  int nall = c;
+
+  c = 0;  
   for(int iw = 0; iw < n_walk; iw++){
-    OTOO::jjj[iw][0] = c;
+    OTOO::jjj[iw].x = c;
 
+    int offset = ni;
     for(int j = 0; j < n_epj[iw]; j++){
-      PS::F64vec xj = epj[iw][j].getPos();
-      OTOO::xxx[c][0] = xj.x;
-      OTOO::xxx[c][1] = xj.y;
-      OTOO::xxx[c][2] = xj.z;
-      OTOO::xxx[c][3] = epj[iw][j].m;
-
-      PS::F64vec vi = epj[iw][j].v;
-      OTOO::vvv[c][0] = vi.x;
-      OTOO::vvv[c][1] = vi.y;
-      OTOO::vvv[c][2] = vi.z;
-      OTOO::vvv[c][3] = epj[iw][j].h;
-
-      OTOO::rho[c][0] = epj[iw][j].dn;
-      OTOO::rho[c][1] = epj[iw][j].cs;
-      OTOO::rho[c][2] = epj[iw][j].vv;
-      OTOO::rho[c][3] = epj[iw][j].pp;
-
-      OTOO::mas[c]    = epj[iw][j].m;
-      OTOO::alp[c]    = epj[iw][j].al;
-
-      OTOO::mas[c]    = epj[iw][j].m;
+      int jj = id_epj[iw][j] + offset;
+      OTOO::idx[c] = jj;
       c++;
     }
 
-    OTOO::jjj[iw][1] = c;
+    OTOO::jjj[iw].y = c;
   }
-
+  int nidx = c;
+  
   cl_bool flag = CL_FALSE; 
-  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_xi[0],  flag, 0, c*sizeof(cl_double4),   OTOO::xxx, 0, NULL, NULL);
-  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_vel[0], flag, 0, c*sizeof(cl_double4),   OTOO::vvv, 0, NULL, NULL);
-  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_rho[0], flag, 0, c*sizeof(cl_double4),   OTOO::rho, 0, NULL, NULL);
-  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_mas[0], flag, 0, c*sizeof(cl_double),    OTOO::mas, 0, NULL, NULL);
-  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_alp[0], flag, 0, c*sizeof(cl_double),    OTOO::alp, 0, NULL, NULL);
+  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_xi[0],  flag, 0, nall*sizeof(cl_double4),   OTOO::xxx, 0, NULL, NULL);
+  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_vel[0], flag, 0, nall*sizeof(cl_double4),   OTOO::vvv, 0, NULL, NULL);
+  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_rho[0], flag, 0, nall*sizeof(cl_double4),   OTOO::rho, 0, NULL, NULL);
+  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_alp[0], flag, 0, nall*sizeof(cl_double),    OTOO::alp, 0, NULL, NULL);
   clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_jj[0],  flag, 0, n_walk*sizeof(cl_int2), OTOO::jjj, 0, NULL, NULL);
 
+  clEnqueueWriteBuffer(OTOO::ov[0]->q, OTOO::b_idx[0], flag, 0, nidx*sizeof(cl_int),       OTOO::idx, 0, NULL, NULL);
+  
   OTOO::globalThreads[0] = ni;
   cl_int status = CL_SUCCESS;
   status = clEnqueueNDRangeKernel(OTOO::ov[0]->q, OTOO::ker_sph2[0],
@@ -683,8 +589,17 @@ PS::S32 RetrieveKernelSPH2(const PS::S32 tag,
                        SPH2 *force[])
 {
   uint64 c = 0;
+  if (n_walk == 0) return 0;
+
   c = OTOO::globalThreads[0];
   clFinish(OTOO::ov[0]->q);
+
+  {
+    cl_ulong st, en;
+    clGetEventProfilingInfo (OTOO::ker_event[0], CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &st, NULL);
+    clGetEventProfilingInfo (OTOO::ker_event[0], CL_PROFILING_COMMAND_END,   sizeof(cl_ulong), &en, NULL);
+    OTOO::kernel_time_sph2 += (en - st)*1.0e-9;
+  }
   
   cl_bool flag = CL_TRUE;
   clEnqueueReadBuffer(OTOO::ov[0]->q, OTOO::b_acc[0], flag, 0, c*sizeof(cl_double4), OTOO::ggg, 0, NULL, NULL);
@@ -692,12 +607,14 @@ PS::S32 RetrieveKernelSPH2(const PS::S32 tag,
   c = 0;
   for(int iw=0; iw<n_walk; iw++){
     for(int i=0; i<ni[iw]; i++){
-      force[iw][i].acc.x = OTOO::ggg[c][0];
-      force[iw][i].acc.y = OTOO::ggg[c][1];
-      force[iw][i].acc.z = OTOO::ggg[c][2];
-      force[iw][i].de    = OTOO::ggg[c][3];
+      force[iw][i].acc.x = OTOO::ggg[c].x;
+      force[iw][i].acc.y = OTOO::ggg[c].y;
+      force[iw][i].acc.z = OTOO::ggg[c].z;
+      force[iw][i].de    = OTOO::ggg[c].w;
       c++;
     }
   }
+
+  OTOO::kernel_count++;
   return 0;
 }

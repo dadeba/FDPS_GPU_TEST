@@ -2,12 +2,13 @@
 
 __kernel
 void 
-grav(
-     __global double4 READONLY_P xi_global,
-     __global int2 READONLY_P jj_global, 
-     __global double4 *acc,
-     const double e2
-     )
+grav_index(
+	   __global double4 READONLY_P xi_global,
+	   __global int2 READONLY_P jj_global,
+	   __global int READONLY_P idx,
+	   __global double4 *acc,
+	   const double e2
+	   )
 {
   unsigned int g_xid = get_global_id(0);
   unsigned int g_yid = get_global_id(1);
@@ -26,7 +27,8 @@ grav(
   a_x = a_y = a_z = p_t = 0.0;
 
   for(int j = j0; j < j1; j++) {
-    double4 xj = xi_global[j];
+    int jjj = idx[j];
+    double4 xj = xi_global[jjj];
     double  mj = xj.w;
     
     double dx, dy, dz;
@@ -51,6 +53,7 @@ grav(
   acc[i].z = a_z;
   acc[i].w = p_t;
 }
+
 
 double sph_kernel(double q)
 {
@@ -91,62 +94,19 @@ double sph_dkernel(double q)
   return dum;
 }
 
-/*
-__kernel
-void 
-ker_nn(
-       __global double4 READONLY_P xi_global,
-       __global double  READONLY_P hh_global,
-       __global int2 READONLY_P jj_global, 
-       __global double *nn,
-       )
-{
-  unsigned int g_xid = get_global_id(0);
-  unsigned int g_yid = get_global_id(1);
-  unsigned int g_w   = get_global_size(0);
-  unsigned int gid   = g_yid*g_w + g_xid;
-  unsigned int i = gid;
-
-  double4 xi = xi_global[i];
-  double  hi = hh_global[i];
-  
-  int iw = (int)xi.w;
-  int2 jj = jj_global[iw];
-  int j0 = jj.x;
-  int j1 = jj.y;
-
-  double nn0 = 0.0;
-  for(int j = j0; j < j1; j++) {
-    double4 xj = xi_global[j];
-    double  hj = hh_global[j];
-
-    h1_i = 2.0/(hi + hj);
-    q = native_sqrt(r2)*h1_i;
-
-    if (q < 1.5) {
-      nn0 += 1.0;
-    } else {
-      nn0 += sph_kernel(4.0*(q-1.5));
-    }
-  }
-
-  nn[i] = nn0;
-}
-*/
-
 double R2(double4 p)
 {
   return p.x*p.x + p.y*p.y + p.z*p.z;
 }
 
 __kernel
-void ker_sph1(
-	      __global double4 READONLY_P pos_global, // x, y, z, iw
-	      __global double4 READONLY_P vel_global, // vx, vy, vz, h
-	      __global double  READONLY_P mas_global, // mj
-	      __global int2 READONLY_P jj_global, 
-	      __global double4 *res
-	      )
+void ker_sph1_index(
+		    __global double4 READONLY_P pos_global, // x, y, z, iw/mj
+		    __global double4 READONLY_P vel_global, // vx, vy, vz, h
+		    __global int2 READONLY_P jj_global, 
+		    __global int READONLY_P idx,
+		    __global double4 *res
+		    )
 {
   unsigned int g_xid = get_global_id(0);
   unsigned int g_yid = get_global_id(1);
@@ -167,9 +127,10 @@ void ker_sph1(
   double4 den = (double4)(0.0, 0.0, 0.0, 0.0);
   double2 dd  = (double2)(0.0, 0.0);
   for(int j = j0; j < j1; j++) {
-    double4 xj = pos_global[j]; // x, y, z
-    double4 vj = vel_global[j]; // vx, vy, vz, h
-    double  mj = mas_global[j];
+    int jjj = idx[j];
+    double4 xj = pos_global[jjj]; // x, y, z, mj
+    double4 vj = vel_global[jjj]; // vx, vy, vz, h
+    double  mj = xj.w;
     double  hj = vj.w;
       
     double4 dx = xi - xj;
@@ -219,15 +180,15 @@ void ker_sph1(
 }
 
 __kernel
-void ker_sph2(
-	      __global double4 READONLY_P pos_global,
-	      __global double4 READONLY_P vel_global,
-	      __global double4 READONLY_P rho_global,
-	      __global double  READONLY_P mas_global,
-	      __global double  READONLY_P alp_global,
-	      __global int2 READONLY_P jj_global, 
-	      __global double4 *res
-	      )
+void ker_sph2_index(
+		    __global double4 READONLY_P pos_global,
+		    __global double4 READONLY_P vel_global,
+		    __global double4 READONLY_P rho_global,
+		    __global double  READONLY_P alp_global,
+		    __global int2 READONLY_P jj_global, 
+		    __global int READONLY_P idx,
+		    __global double4 *res
+		    )
 {
   unsigned int g_xid = get_global_id(0);
   unsigned int g_yid = get_global_id(1);
@@ -250,12 +211,13 @@ void ker_sph2(
   double4 a = (double4)(0.0, 0.0, 0.0, 0.0);
 
   for(int j = j0; j < j1; j++) {
-    double4 xj = pos_global[j]; // x, y, z
-    double4 vj = vel_global[j]; // vx, vy, vz, h
-    double4 rj = rho_global[j]; // rho, cs, vvi, ppi
-    double  mj = mas_global[j];
+    int jjj = idx[j];
+    double4 xj = pos_global[jjj]; // x, y, z
+    double4 vj = vel_global[jjj]; // vx, vy, vz, h
+    double4 rj = rho_global[jjj]; // rho, cs, vvi, ppi
+    double  mj = xj.w;
     double  hj = vj.w;
-    double  alphj = alp_global[j];
+    double  alphj = alp_global[jjj];
     
     double4 dx = xi - xj;
     double  r2 = R2(dx);
